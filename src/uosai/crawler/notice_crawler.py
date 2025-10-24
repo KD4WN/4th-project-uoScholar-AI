@@ -710,7 +710,7 @@ def process_one_cheme(wr_id: int) -> str:
     db_link    = crawl_link  # DB에 저장할 링크
 
     # 중복 체크
-    prev_dt_raw = get_existing_posted_date("DEPT_CHEMICAL_ENGINEERING", post_number)
+    prev_dt_raw = get_existing_posted_date("COLLEGE_ENGINEERING", post_number)
     prev_dt = _ymd(prev_dt_raw)
     curr_dt = _ymd(posted_date)
 
