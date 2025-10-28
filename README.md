@@ -1,103 +1,199 @@
 # 4rd-project-uoScholar-AI (Python)
 
 ## 프로젝트 소개
-서울시립대 재학생들은 복수전공, 선후수 체계, 수강 제한, 학점 이수 기준 등 학사 관련 정보를 주로 공지사항에서 확인해야 하지만, 공지의 **가독성과 접근성이 떨어져** 원하는 정보를 빠르게 찾기 어렵습니다.  
-이를 해결하기 위해 저희 팀은 필요한 공지를 쉽고 정확하게 제공하는 챗봇 어플리케이션 "**UoScholar**"를 개발하였습니다.
+서울시립대 재학생들은 복수전공, 선후수 체계, 수강 제한, 학점 이수 기준 등 학사 관련 정보를 주로 공지사항에서 확인해야 하지만, 공지의 **가독성과 접근성이 떨어져** 원하는 정보를 빠르게 찾기 어렵습니다.
 
-UoScholar는 서울시립대학교 공지사항 데이터를 크롤링하고, 임베딩을 통해 벡터로 DB에 저장합니다. 이후 LLM 기반 프롬프트 엔지니어링을 통해 학생들의 질문에 맞는 공지사항을 찾아내고, 이를 포함한 자연어 답변을 제공합니다.
+이를 해결하기 위해 저희 팀은 필요한 공지를 쉽고 정확하게 제공하는 **RAG 기반 챗봇 "UoScholar"**를 개발하였습니다.
 
----
-
-## 파이프라인
-
-### 1. 공지사항 크롤링 및 PDF 추출
-1. **공지 HTML 수집 (Requests + BeautifulSoup)**  
-   - 공지 URL(`list_id`, `seq`)을 요청하고, 제목·부서·작성일·게시물 번호 등을 파싱  
-
-2. **PDF 변환 (Playwright)**  
-   - Chromium 기반으로 HTML 페이지를 PDF로 저장  
-   - 로딩 안정화(`domcontentloaded → networkidle → 추가 대기`) 후 추출  
-   - 실패 시 해당 게시물은 스킵  
-
-3. **공지 요약 (OpenAI GPT-4o-mini)**  
-   - PDF를 OpenAI API에 업로드  
-   - **제목, 부서, 기간, 장소, 대상, 문의처** 중심으로 한 단락 요약  
-   - 날짜는 YYYY-MM-DD 형식으로 정규화  
-
-4. **임베딩 생성 (text-embedding-3-small)**  
-   - 요약 텍스트를 임베딩 벡터로 변환  
-   - JSON 형태로 DB 저장  
-
-5. **DB 업서트 (MySQL)**  
-   - 새로운 공지를 `INSERT ... ON DUPLICATE KEY UPDATE`로 저장  
-   - 이미 존재하는 `post_number`는 최신 요약·임베딩으로 갱신  
-
-6. **크롤링 루프 제어**  
-   - `crawl_category` 함수는 시작 `seq`부터 순차 탐색  
-   - 게시물 없음(`not_found`)이 연속 일정 횟수(`missing_break`) 발생 시 크롤링 종료  
+UoScholar는 서울시립대학교 공지사항 데이터를 크롤링하고, 벡터 임베딩을 통해 Pinecone DB에 저장합니다. 이후 **Retrieval-Augmented Generation (RAG)** 기법과 **Cohere Reranker**를 활용하여 학생들의 질문에 가장 적합한 공지사항을 찾아내고, LLM 기반으로 자연스러운 답변을 제공합니다.
 
 ---
 
-### 2. 사용자 질문 분석 및 답변 생성
-1. **사용자 질문 입력 (FastAPI)**  
-   - 클라이언트가 `/analyze_question` 엔드포인트에 질문 전달  
+## 시스템 아키텍처
 
-2. **키워드 추출 (LLM 기반)**  
-   - GPT를 활용해 질문에서 JSON 형식으로 키워드 추출  
-     - `title_keywords`: 제목 핵심 단어  
-     - `writer_keywords`: 작성 부서  
-     - `year`: 특정 연도 (없으면 null)  
+```
+공지 크롤링 → MySQL → 벡터 인덱싱 → Pinecone → RAG 챗봇 → 사용자
+(Playwright)         (한국어 임베딩)        (Cohere Reranker)
+```
 
-3. **DB 검색 (MySQL)**  
-   - `title_keywords`는 OR 조건  
-   - `writer_keywords`는 LIKE 조건  
-   - `year`는 필터링하여 최대 10개 공지를 반환  
+---
 
-4. **GPT 응답 생성**  
-   - 검색된 공지들을 요약 목록으로 GPT에 전달  
-   - GPT가 질문 의도에 맞는 자연스러운 답변을 생성  
+## 주요 기능
 
-5. **최종 응답 반환**  
-   - API는 `추출된 키워드`, `검색 결과`, `GPT 답변`을 JSON으로 반환  
+### 1. 공지사항 크롤링 (`notice_crawler.py`)
+- BeautifulSoup으로 목록 페이지에서 최신 공지 URL 수집
+- Playwright로 공지 페이지 전체 스크린샷 캡처
+- GPT-4o Vision API로 **HTML 텍스트 + 이미지** 멀티모달 요약
+- MySQL에 공지 메타데이터 및 요약 저장
+
+### 2. 벡터 인덱싱 (`index.py`)
+- MySQL에서 공지 데이터 읽기
+- LangChain으로 900자 단위 청킹 (오버랩 150자)
+- 한국어 임베딩 모델(`jhgan/ko-sroberta-multitask`)로 768차원 벡터 생성
+- Pinecone에 title/summary 타입 구분하여 저장
+
+### 3. RAG 챗봇 (`chatbot.py`)
+- **Cohere Reranker**로 검색 결과 재정렬
+- **세션 기반 대화 관리** (대화 히스토리 추적)
+- **요구사항 자동 추출** (LLM이 키워드, 카테고리 등 분석)
+- **명확화 질문 생성** (검색 실패 시 추가 정보 요청)
+
+#### 📌 대화형 챗봇 플로우
+
+```
+사용자 질문
+    │
+    ▼
+┌─────────────────────────┐
+│ 1. 요구사항 추출 (LLM)  │  ← JSON 형식: category, keywords, target_audience 등
+└───────────┬─────────────┘
+            │
+            ▼
+      ┌────────────┐
+      │ 공지 관련? │
+      └─────┬──────┘
+            │
+    ┌───────┴────────┐
+    │                │
+   YES              NO
+    │                │
+    ▼                ▼
+┌───────────┐   ┌────────────┐
+│ 벡터 검색 │   │ 일반 대화  │
+│ + Rerank  │   │ 응답 생성  │
+└─────┬─────┘   └────────────┘
+      │
+ ┌────┴─────┐
+ │          │
+발견       미발견
+ │          │
+ ▼          ▼
+최종추천   명확화질문
+```
+
+**특징**:
+- **세션 기반 대화 관리**: `session_id`로 대화 히스토리 추적
+- **공지 관련 여부 판단**: LLM이 질문을 분석하여 공지 검색이 필요한지 자동 판단
+- **명확화 질문**: 검색 결과가 부족하면 추가 정보를 자연스럽게 요청
+- **날짜 인식**: "최근", "이번 달" 등 상대적 날짜 표현 처리 (현재 날짜 기준)
+
+**API 엔드포인트**:
+```bash
+POST /chat
+{
+  "query": "장학금 신청 일정 알려줘",
+  "session_id": "user123"
+}
+```
+
+**응답 예시**:
+```json
+{
+  "response": "제가 찾아낸 공지는 '2024학년도 1학기 교내장학금 신청 안내'입니다...",
+  "turn": 1,
+  "completed": false,
+  "recommended_notice": {
+    "title": "2024학년도 1학기 교내장학금 신청 안내",
+    "link": "https://www.uos.ac.kr/...",
+    "posted_date": "2024-03-01",
+    "department": "학생처",
+    "score": 0.87
+  }
+}
+```
 
 ---
 
 ## 기술 스택
-- **Python**: 데이터 크롤링과 AI 파이프라인 개발에 적합한 범용 언어  
-- **FastAPI**: 경량·비동기 REST API 서버 구축을 위한 프레임워크  
-- **MySQL**: 공지사항 데이터 저장 및 검색 최적화  
-- **OpenAI GPT (LangChain 포함)**: 자연어 처리, 키워드 추출, 응답 생성을 담당  
-- **Requests & BeautifulSoup**: HTML 요청 및 DOM 파싱  
-- **Playwright**: 동적 페이지도 안정적으로 PDF 변환  
+
+### Backend & AI
+- **Python 3.10+**: 전체 시스템 구현 언어
+- **FastAPI**: REST API 서버 (비동기 처리)
+- **LangChain**: RAG 파이프라인 구축 (청킹, 벡터 검색)
+- **OpenAI GPT-4o / GPT-4o-mini**: 멀티모달 요약, 대화 생성, 요구사항 분석
+- **Cohere Rerank**: 검색 결과 재정렬
+- **SentenceTransformers**: 한국어 임베딩 (`jhgan/ko-sroberta-multitask`)
+
+### Crawling & Processing
+- **Requests + BeautifulSoup4**: HTML 파싱
+- **Playwright**: 동적 페이지 렌더링 + 이미지 캡처
+- **Pillow**: 이미지 처리
+
+### Database & Vector Store
+- **MySQL**: 공지 원본 데이터 저장
+- **Pinecone**: 벡터 인덱스 (코사인 유사도 검색)
+
+### DevOps
+- **python-dotenv**: 환경 변수 관리
+- **logging**: 로그 추적
 
 ---
 
+## 설치 및 실행
 
-## 응답 예시
+### 1. 환경 설정
 
-### 사용자 질문
 ```bash
-"2024학년도 장학금 신청 일정 알려줘"
-````
+# Python 가상환경 생성 (권장)
+python -m venv venv
+source venv/bin/activate  # Windows: venv\Scripts\activate
 
-### API 응답
+# 의존성 설치
+pip install -r requirements.txt
 
-```json
-{
-  "extracted_keywords": {
-    "title_keywords": ["장학금"],
-    "writer_keywords": ["학생처"],
-    "year": 2024
-  },
-  "search_results": [
-    {
-      "posted_date": "2024-03-01",
-      "department": "학생처",
-      "title": "2024학년도 1학기 장학금 신청 안내",
-      "link": "https://www.uos.ac.kr/..."
-    }
-  ],
-  "gpt_answer": "2024학년도 1학기 장학금 신청은 학생처에서 진행되며 3월 1일부터 접수 시작됩니다."
-}
+# Playwright 브라우저 설치
+playwright install chromium
 ```
+
+### 2. 환경 변수 설정 (`.env`)
+
+```env
+# OpenAI
+OPENAI_API_KEY=sk-...
+
+# MySQL
+DB_HOST=localhost
+DB_PORT=3306
+DB_USER=root
+DB_PASSWORD=yourpassword
+DB_NAME=uos_notices
+
+# Pinecone
+PINECONE_API_KEY=...
+PINECONE_INDEX=uos-notices
+PINECONE_NAMESPACE=  # 비워두면 기본 네임스페이스 사용
+PINECONE_CLOUD=aws
+PINECONE_REGION=us-east-1
+
+# Embedding
+EMBED_TYPE=korean
+EMBED_MODEL=jhgan/ko-sroberta-multitask
+
+# Cohere (Reranker)
+COHERE_API_KEY=...
+
+# Chat Model
+CHAT_MODEL=gpt-4o-mini
+```
+
+
+### 3. 실행 순서
+
+```bash
+# 1단계: 공지 크롤링 (MySQL에 저장)
+python scripts/run_crawler.py
+
+# 2단계: 벡터 인덱싱 (Pinecone에 업로드)
+python scripts/run_indexer.py
+
+# 3단계: 챗봇 서버 실행
+python -m uvicorn src.uosai.chat.chatbot:app --host 0.0.0.0 --port 8000
+```
+
+---
+
+## 참고
+- [LangChain 공식 문서](https://python.langchain.com/)
+- [Pinecone 공식 문서](https://docs.pinecone.io/)
+- [Cohere Rerank](https://docs.cohere.com/docs/reranking)
 

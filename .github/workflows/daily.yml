@@ -18,7 +18,7 @@ jobs:
           pip install -r requirements.txt
           python -m playwright install --with-deps chromium
 
-      - name: Run crawler
+      - name: Run all crawlers
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           DB_HOST: ${{ secrets.DB_HOST }}
@@ -28,4 +28,5 @@ jobs:
           DB_PORT: ${{ secrets.DB_PORT }}
           DB_CHARSET: "utf8mb4"
         run: |
-          python scripts/run_crawler.py
+          cd scripts
+          python run_all_crawlers.py
