@@ -40,8 +40,8 @@ def main():
     # 크롤러 목록 (name, module_name, enabled)
     crawlers = [
         ("포털 공통", "uosai.crawler.portal_crawler", True),
-        ("화학공학과", "uosai.crawler.chemical_crawler", True),  # 주석 처리됨
-        ("생명과학과", "uosai.crawler.life_science_crawler", True),  # 주석 처리됨
+        ("화학공학과", "uosai.crawler.chemical_crawler", True), 
+        ("생명과학과", "uosai.crawler.life_science_crawler", True), 
         ("경제학부", "uosai.crawler.economics_crawler", True),
         ("건축학부", "uosai.crawler.architecture_crawler", True),
         ("조경학과", "uosai.crawler.landscape_crawler", True),
