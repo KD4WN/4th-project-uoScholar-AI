@@ -11,6 +11,7 @@ langchain==0.1.0
 langchain-openai==0.0.5
 langchain-pinecone==0.0.3
 langchain-core>=0.1.16,<0.2
+langsmith>=0.0.66
 
 # AI/ML Services
 openai>=1.0.0,<2.0.0

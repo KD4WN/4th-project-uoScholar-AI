@@ -9,8 +9,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 # requirements가 있다면 먼저 복사/설치해서 캐시 극대화
-COPY requirements.txt* /app/
-RUN if [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.txt; fi
+COPY requirements-chatbot.txt /app/
+RUN pip install --no-cache-dir -r requirements-chatbot.txt
+
+# SentenceTransformer 모델 미리 다운로드 (런타임 시 다운로드 방지)
+RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('jhgan/ko-sroberta-multitask')"
 
 # 소스 복사
 COPY . /app
@@ -18,7 +21,7 @@ COPY . /app
 # 서비스 포트(원하면 바꿀 수 있음)
 ENV PORT=9000
 # 앱 모듈 경로: 기본 main:app (예: main.py 안의 app 객체). 필요하면 배포 전에 APP_MODULE=... 로 바꾸면 됨.
-ENV APP_MODULE=main:app
+ ENV APP_MODULE=src.uosai.chat.chatbot:app
 
 EXPOSE 9000
 

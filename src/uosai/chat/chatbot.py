@@ -7,11 +7,13 @@ from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime, timedelta
 from collections import defaultdict
 from math import sqrt
+from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 
 load_dotenv()
 
-from fastapi import FastAPI
+from fastapi import FastAPI, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_pinecone import PineconeVectorStore
@@ -41,6 +43,16 @@ INITIAL_SEARCH_K = int(os.getenv("INITIAL_SEARCH_K", "20"))  # 초기 검색 개
 FINAL_TOP_K = int(os.getenv("FINAL_TOP_K", "5"))  # Reranker 후 최종 개수
 RERANK_THRESHOLD = float(os.getenv("RERANK_THRESHOLD", "0.1"))  # Reranker 점수 임계값 (더 관대하게)
 
+# 입력 검증 설정
+MAX_QUERY_LENGTH = int(os.getenv("MAX_QUERY_LENGTH", "500"))  # 쿼리 최대 길이
+MAX_CONVERSATION_HISTORY = int(os.getenv("MAX_CONVERSATION_HISTORY", "20"))  # 최대 대화 턴 수
+MAX_MESSAGE_LENGTH = int(os.getenv("MAX_MESSAGE_LENGTH", "2000"))  # 개별 메시지 최대 길이
+
+# API 타임아웃 설정 (초 단위)
+LLM_TIMEOUT = int(os.getenv("LLM_TIMEOUT", "30"))  # LLM API 타임아웃
+VECTORSTORE_TIMEOUT = int(os.getenv("VECTORSTORE_TIMEOUT", "10"))  # 벡터 검색 타임아웃
+COHERE_TIMEOUT = int(os.getenv("COHERE_TIMEOUT", "15"))  # Cohere Reranker 타임아웃
+
 # ===== 전역 객체 =====
 _llm = None
 _embeddings = None
@@ -58,13 +70,61 @@ STOPWORDS = {
 # 로깅 설정
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 
-# 세션별 대화 상태 관리
-conversation_state: Dict[str, Dict[str, Any]] = defaultdict(lambda: {
-    "turns": 0,
-    "messages": [],
-    "user_requirements": {},
-    "completed": False
-})
+# ===== 입력 검증 =====
+class ValidationError(Exception):
+    """입력 검증 실패 시 발생하는 예외"""
+    pass
+
+def validate_input(query: str, conversation_history: List[Dict[str, str]]) -> None:
+    """입력값 검증 (DoS 공격 방지, 프롬프트 인젝션 방지)"""
+
+    # 1. 쿼리 길이 검증
+    if not query or not query.strip():
+        raise ValidationError("질문 내용이 비어있습니다.")
+
+    if len(query) > MAX_QUERY_LENGTH:
+        raise ValidationError(f"질문이 너무 깁니다. (최대 {MAX_QUERY_LENGTH}자)")
+
+    # 2. 대화 내역 개수 제한
+    if len(conversation_history) > MAX_CONVERSATION_HISTORY:
+        raise ValidationError(f"대화 내역이 너무 깁니다. (최대 {MAX_CONVERSATION_HISTORY}턴)")
+
+    # 3. 개별 메시지 길이 검증
+    for i, msg in enumerate(conversation_history):
+        content = msg.get("content", "")
+        if len(content) > MAX_MESSAGE_LENGTH:
+            raise ValidationError(f"대화 내역의 {i+1}번째 메시지가 너무 깁니다. (최대 {MAX_MESSAGE_LENGTH}자)")
+
+    # 4. Role 검증 (user 또는 assistant만 허용)
+    for i, msg in enumerate(conversation_history):
+        role = msg.get("role", "")
+        if role not in ["user", "assistant"]:
+            raise ValidationError(f"올바르지 않은 role 값입니다: {role}")
+
+    # 5. 프롬프트 인젝션 패턴 감지 (기본적인 방어)
+    suspicious_patterns = [
+        "ignore previous instructions",
+        "ignore all previous",
+        "disregard previous",
+        "you are now",
+        "new instructions:",
+        "system:",
+        "assistant:",
+        "<|im_start|>",
+        "<|im_end|>",
+        "```python",  # 코드 실행 시도
+    ]
+
+    combined_text = query.lower() + " " + " ".join([m.get("content", "").lower() for m in conversation_history])
+
+    for pattern in suspicious_patterns:
+        if pattern in combined_text:
+            logging.warning(f"Suspicious pattern detected: {pattern}")
+            # 로그만 남기고 차단하지는 않음 (false positive 방지)
+
+    # 6. 반복 문자 패턴 감지 (DoS 공격)
+    if len(set(query)) < 5 and len(query) > 50:  # 5개 미만의 고유 문자로 50자 이상
+        raise ValidationError("비정상적인 입력 패턴이 감지되었습니다.")
 
 def get_llm():
     global _llm
@@ -72,7 +132,9 @@ def get_llm():
         _llm = ChatOpenAI(
             model=CHAT_MODEL,
             temperature=0.1,
-            api_key=OPENAI_API_KEY
+            api_key=OPENAI_API_KEY,
+            request_timeout=LLM_TIMEOUT,  # 타임아웃 설정
+            max_retries=2  # 최대 재시도 횟수
         )
     return _llm
 
@@ -109,13 +171,13 @@ def get_embeddings():
     if _embeddings is None:
         if EMBED_TYPE == "korean":
             _embeddings = KoreanSentenceTransformerEmbeddings(EMBED_MODEL)
-            logging.info("✅ Korean embedding model loaded: %s", EMBED_MODEL)
+            logging.info("Korean embedding model loaded: %s", EMBED_MODEL)
         else:
             _embeddings = OpenAIEmbeddings(
                 model=EMBED_MODEL,
                 api_key=OPENAI_API_KEY
             )
-            logging.info("✅ OpenAI embedding model loaded: %s", EMBED_MODEL)
+            logging.info("OpenAI embedding model loaded: %s", EMBED_MODEL)
     return _embeddings
 
 def get_cohere_client():
@@ -123,7 +185,7 @@ def get_cohere_client():
     global _cohere_client
     if _cohere_client is None and COHERE_API_KEY:
         _cohere_client = cohere.Client(COHERE_API_KEY)
-        logging.info("✅ Cohere client initialized")
+        logging.info("Cohere client initialized")
     return _cohere_client
 
 def get_vectorstore():
@@ -131,14 +193,14 @@ def get_vectorstore():
     if _vectorstore is None:
         if _pc_client is None:
             _pc_client = Pinecone(api_key=PINECONE_API_KEY)
-            logging.info("✅ Pinecone client initialized")
+            logging.info("Pinecone client initialized")
 
         _vectorstore = PineconeVectorStore.from_existing_index(
             index_name=PINECONE_INDEX,
             embedding=get_embeddings(),
             namespace=PINECONE_NS
         )
-        logging.info("✅ PineconeVectorStore ready: %s (ns=%s)", PINECONE_INDEX, PINECONE_NS)
+        logging.info("PineconeVectorStore ready: %s (ns=%s)", PINECONE_INDEX, PINECONE_NS)
     return _vectorstore
 
 
@@ -367,8 +429,7 @@ def rerank_documents(query: str, docs: List[Document]) -> List[Tuple[Document, f
             model="rerank-multilingual-v3.0",  # 다국어 지원 모델
             query=enhanced_query,  # 날짜 정보가 포함된 쿼리
             documents=documents,
-            top_n=min(FINAL_TOP_K, len(docs)),
-            return_documents=True
+            top_n=min(FINAL_TOP_K, len(docs))
         )
 
         # 결과 처리
@@ -533,10 +594,6 @@ def generate_final_recommendation(requirements: Dict[str, Any], notice: Dict[str
 6. 사용자가 알고 싶어하는 핵심 정보(언제, 어디서, 누가, 어떻게)를 자연스럽게 포함하세요
 7. 마지막에 링크: {notice.get('link')} 제공
 
-**예시 톤:**
-- 기간이 지났다면: "아쉽게도 네이버 클라우드 아카데미 1기 모집은 9월 26일에 마감되었어요. 하지만 다음 기수 모집 정보는..."
-- 진행 중이라면: "네이버 클라우드 아카데미 1기 모집이 9월 26일까지 진행되고 있어요. 현재 모집 중이니 서둘러 신청하세요!"
-
 자연스럽고 친근한 답변을 작성해주세요:"""
 
     llm = get_llm()
@@ -547,7 +604,7 @@ def generate_final_recommendation(requirements: Dict[str, Any], notice: Dict[str
 def preload_models():
     """앱 시작 시 모든 모델을 미리 로드하여 첫 요청 속도 개선"""
     try:
-        logging.info("🚀 Preloading models...")
+        logging.info("Preloading models...")
         # 임베딩 모델 로드
         get_embeddings()
         # 벡터스토어 초기화
@@ -556,26 +613,61 @@ def preload_models():
         get_cohere_client()
         # LLM 초기화
         get_llm()
-        logging.info("✅ All models preloaded successfully!")
+        logging.info("All models preloaded successfully!")
     except Exception as e:
-        logging.error("❌ Error preloading models: %s", e)
+        logging.error("Error preloading models: %s", e)
+
+def cleanup_resources():
+    """앱 종료 시 리소스 정리"""
+    global _llm, _embeddings, _vectorstore, _pc_client, _cohere_client
+    try:
+        logging.info("Cleaning up resources...")
+        # 전역 객체 정리
+        _llm = None
+        _embeddings = None
+        _vectorstore = None
+        _pc_client = None
+        _cohere_client = None
+        logging.info("Resources cleaned up successfully!")
+    except Exception as e:
+        logging.error("Error cleaning up resources: %s", e)
+
+# ===== FastAPI 앱 lifespan =====
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """앱 시작/종료 시 실행되는 lifespan 핸들러"""
+    # 시작 시
+    preload_models()
+    yield
+    # 종료 시
+    cleanup_resources()
 
 # ===== FastAPI 앱 =====
-app = FastAPI(title="Notice Recommendation Chatbot", version="1.0.0")
+app = FastAPI(
+    title="Notice Recommendation Chatbot",
+    version="1.0.0",
+    lifespan=lifespan
+)
 
-@app.on_event("startup")
-async def startup_event():
-    """앱 시작 시 모델 프리로딩"""
-    preload_models()
+class ChatMessage(BaseModel):
+    role: str  # "user" or "assistant"
+    content: str
+    timestamp: Optional[str] = None
+
+    class Config:
+        # Pydantic v2 호환성
+        str_strip_whitespace = True
 
 class ChatRequest(BaseModel):
     query: str
-    session_id: str
+    conversation_history: List[ChatMessage] = []  # 클라이언트가 전체 대화 내역 전송
+
+    class Config:
+        str_strip_whitespace = True
 
 class ChatResponse(BaseModel):
     response: str
     turn: int
-    completed: bool
     recommended_notice: Optional[Dict[str, Any]] = None
 
 @app.get("/health")
@@ -589,41 +681,44 @@ def health_check():
 
 @app.post("/chat", response_model=ChatResponse)
 def chat(request: ChatRequest):
-    """대화형 공지 추천 엔드포인트"""
+    """대화형 공지 추천 엔드포인트 (Stateless)"""
     try:
-        session_id = request.session_id
-        state = conversation_state[session_id]
+        # 클라이언트로부터 받은 대화 내역을 딕셔너리로 변환
+        messages = [msg.dict() for msg in request.conversation_history]
 
-        # 사용자 메시지 추가
-        state["messages"].append({
+        # 입력 검증
+        try:
+            validate_input(request.query, messages)
+        except ValidationError as ve:
+            logging.warning(f"Validation failed: {ve}")
+            return ChatResponse(
+                response=str(ve),
+                turn=0,
+                recommended_notice=None
+            )
+
+        # 현재 사용자 메시지 추가
+        messages.append({
             "role": "user",
             "content": request.query,
             "timestamp": datetime.now().isoformat()
         })
-        state["turns"] += 1
+
+        current_turn = len([m for m in messages if m["role"] == "user"])
 
         # 매 턴마다 요구사항 추출
-        requirements = extract_requirements(state["messages"])
-        state["user_requirements"] = requirements
+        requirements = extract_requirements(messages)
 
         # 공지사항 관련 질문인지 확인
         is_notice_related = requirements.get("is_notice_related", True)
 
         if not is_notice_related:
             # 공지사항과 관련 없는 질문: 일반 대화 응답
-            casual_response = generate_casual_response(state["messages"])
-
-            # 챗봇 응답 추가
-            state["messages"].append({
-                "role": "assistant",
-                "content": casual_response,
-                "timestamp": datetime.now().isoformat()
-            })
+            casual_response = generate_casual_response(messages)
 
             return ChatResponse(
                 response=casual_response,
-                turn=state["turns"],
-                completed=False,
+                turn=current_turn,
                 recommended_notice=None
             )
 
@@ -632,78 +727,31 @@ def chat(request: ChatRequest):
 
         if best_notice:
             # 공지를 찾았을 때: 최종 추천 메시지 생성
-            final_response = generate_final_recommendation(requirements, best_notice, state["messages"])
-
-            # 챗봇 응답 추가
-            state["messages"].append({
-                "role": "assistant",
-                "content": final_response,
-                "timestamp": datetime.now().isoformat()
-            })
+            final_response = generate_final_recommendation(requirements, best_notice, messages)
 
             return ChatResponse(
                 response=final_response,
-                turn=state["turns"],
-                completed=False,  # 대화 계속 가능
+                turn=current_turn,
                 recommended_notice=best_notice
             )
         else:
             # 공지를 찾지 못했을 때: 명확화 질문 생성
-            clarifying_question = generate_clarifying_question(state["turns"], state["messages"])
-
-            # 챗봇 응답 추가
-            state["messages"].append({
-                "role": "assistant",
-                "content": clarifying_question,
-                "timestamp": datetime.now().isoformat()
-            })
+            clarifying_question = generate_clarifying_question(current_turn, messages)
 
             return ChatResponse(
                 response=clarifying_question,
-                turn=state["turns"],
-                completed=False,
+                turn=current_turn,
                 recommended_notice=None
             )
 
     except Exception as e:
+        logging.error(f"Chat error: {e}", exc_info=True)
         return ChatResponse(
-            response=f"죄송합니다. 오류가 발생했습니다: {str(e)}",
+            response="죄송합니다. 일시적인 오류가 발생했습니다. 다시 시도해주세요.",
             turn=0,
-            completed=False,
             recommended_notice=None
         )
 
-@app.get("/session/{session_id}")
-def get_session_info(session_id: str):
-    """세션 정보 조회"""
-    state = conversation_state.get(session_id)
-    if not state:
-        return {"error": "세션을 찾을 수 없습니다."}
-
-    return {
-        "session_id": session_id,
-        "turns": state["turns"],
-        "completed": state["completed"],
-        "messages": state["messages"],
-        "user_requirements": state.get("user_requirements", {})
-    }
-
-@app.delete("/session/{session_id}")
-def reset_session(session_id: str):
-    """세션 초기화"""
-    if session_id in conversation_state:
-        del conversation_state[session_id]
-    return {"message": f"세션 {session_id}이 초기화되었습니다."}
-
-@app.get("/sessions")
-def get_active_sessions():
-    """활성 세션 목록"""
-    sessions = []
-    for session_id, state in conversation_state.items():
-        sessions.append({
-            "session_id": session_id,
-            "turns": state["turns"],
-            "completed": state["completed"],
-            "last_activity": state["messages"][-1]["timestamp"] if state["messages"] else None
-        })
-    return {"sessions": sessions}
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
