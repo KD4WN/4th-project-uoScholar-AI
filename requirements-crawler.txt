@@ -1,0 +1,7 @@
+openai>=1.0.0
+playwright
+mysql-connector-python
+requests
+beautifulsoup4
+pillow
+python-dotenv

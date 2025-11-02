@@ -15,7 +15,7 @@ jobs:
 
       - name: Install deps
         run: |
-          pip install -r requirements.txt
+          pip install -r requirements-crawler.txt
           python -m playwright install --with-deps chromium
 
       - name: Run all crawlers

@@ -1,0 +1,28 @@
+# Core
+python-dotenv==1.0.0
+
+# Web Framework
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+pydantic==2.5.0
+
+# LangChain Ecosystem
+langchain==0.1.0
+langchain-openai==0.0.5
+langchain-pinecone==0.0.3
+langchain-core>=0.1.16,<0.2
+
+# AI/ML Services
+openai>=1.0.0,<2.0.0
+pinecone-client==3.0.0
+sentence-transformers==2.3.1
+cohere==4.44
+
+# PyTorch (안정적인 일반 버전)
+torch>=2.0.0
+
+# Utilities
+httpx==0.26.0
+tiktoken==0.5.2
+tenacity==8.2.3
+requests==2.31.0
