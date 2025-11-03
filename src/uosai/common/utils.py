@@ -7,10 +7,8 @@ from mysql.connector import pooling, Error as MySQLError
 from langchain.schema import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_openai import OpenAIEmbeddings
-from langchain.embeddings.base import Embeddings
 from pinecone import Pinecone, ServerlessSpec
 from langchain_pinecone import PineconeVectorStore
-from sentence_transformers import SentenceTransformer
 
 # ===== Helpers =====
 def _env_bool(val: str | None, default: bool) -> bool:
@@ -18,41 +16,8 @@ def _env_bool(val: str | None, default: bool) -> bool:
         return default
     return val.strip().lower() in {"1", "true", "t", "yes", "y", "on"}
 
-# ===== Korean Embedding Model =====
-class KoreanSentenceTransformerEmbeddings(Embeddings):
-    """한국어 특화 SentenceTransformer 임베딩 클래스"""
-
-    def __init__(self, model_name: str = "jhgan/ko-sroberta-multitask"):
-        """
-        Args:
-            model_name: 사용할 한국어 SentenceTransformer 모델명
-                      - jhgan/ko-sroberta-multitask (추천)
-                      - snunlp/KR-SBERT-V40K-klueNLI-augSTS
-                      - BM-K/KoSimCSE-roberta-multitask
-        """
-        print(f"[Korean Embedding] Loading model: {model_name}")
-        self.model = SentenceTransformer(model_name)
-        self.dimension = self.model.get_sentence_embedding_dimension()
-        print(f"[Korean Embedding] Model loaded, dimension: {self.dimension}")
-
-    def embed_documents(self, texts: List[str]) -> List[List[float]]:
-        """문서들을 임베딩"""
-        if not texts:
-            return []
-        embeddings = self.model.encode(texts, convert_to_tensor=False, show_progress_bar=True)
-        return embeddings.tolist()
-
-    def embed_query(self, text: str) -> List[float]:
-        """쿼리를 임베딩"""
-        if not text:
-            return []
-        embedding = self.model.encode([text], convert_to_tensor=False)
-        return embedding[0].tolist()
-
 # ===== Embedding / Pinecone Env =====
-# 임베딩 모델 타입: 'openai' 또는 'korean'
-EMBED_TYPE = os.getenv("EMBED_TYPE", "korean")
-EMBED_MODEL = os.getenv("EMBED_MODEL", "jhgan/ko-sroberta-multitask")  # 한국어 모델 기본값
+EMBED_MODEL = os.getenv("EMBED_MODEL", "text-embedding-3-small")
 
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 PINECONE_INDEX   = os.getenv("PINECONE_INDEX", "uos-notices")
@@ -67,22 +32,8 @@ CHUNK_SIZE     = int(os.getenv("CHUNK_SIZE", "900"))
 CHUNK_OVERLAP  = int(os.getenv("CHUNK_OVERLAP", "150"))
 MAX_DOC_LEN    = int(os.getenv("MAX_DOC_LEN", "12000"))
 
-# 임베딩 차원 매핑
-EMBED_DIM_MAP = {
-    # OpenAI 모델들
-    "text-embedding-3-small": 1536,
-    "text-embedding-3-large": 3072,
-    # 한국어 모델들 (기본값: 768)
-    "jhgan/ko-sroberta-multitask": 768,
-    "snunlp/KR-SBERT-V40K-klueNLI-augSTS": 768,
-    "BM-K/KoSimCSE-roberta-multitask": 768,
-}
-
-# 임베딩 차원 결정
-if EMBED_TYPE == "korean":
-    EMBED_DIM = EMBED_DIM_MAP.get(EMBED_MODEL, 768)  # 한국어 모델 기본 768차원
-else:
-    EMBED_DIM = EMBED_DIM_MAP.get(EMBED_MODEL, 1536)  # OpenAI 모델 기본 1536차원
+# OpenAI 임베딩 차원
+EMBED_DIM = 1536  # text-embedding-3-small
 
 # ===== DB (lazy pool) =====
 DB_CONFIG = {
@@ -197,12 +148,8 @@ def get_embedding_instance():
     """임베딩 인스턴스를 재사용하기 위한 캐싱"""
     global _EMBEDDING_INSTANCE
     if _EMBEDDING_INSTANCE is None:
-        if EMBED_TYPE == "korean":
-            _EMBEDDING_INSTANCE = KoreanSentenceTransformerEmbeddings(model_name=EMBED_MODEL)
-            print(f"[Vectorstore] Using Korean embedding model: {EMBED_MODEL} (dim: {_EMBEDDING_INSTANCE.dimension})")
-        else:
-            _EMBEDDING_INSTANCE = OpenAIEmbeddings(model=EMBED_MODEL)
-            print(f"[Vectorstore] Using OpenAI embedding model: {EMBED_MODEL}")
+        _EMBEDDING_INSTANCE = OpenAIEmbeddings(model=EMBED_MODEL)
+        print(f"[Vectorstore] Using OpenAI embedding model: {EMBED_MODEL}")
     return _EMBEDDING_INSTANCE
 
 # ===== Pinecone =====

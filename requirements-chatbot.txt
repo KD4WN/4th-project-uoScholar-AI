@@ -16,11 +16,7 @@ langsmith>=0.0.66
 # AI/ML Services
 openai>=1.0.0,<2.0.0
 pinecone-client==3.0.0
-sentence-transformers==2.3.1
 cohere==4.44
-
-# PyTorch (안정적인 일반 버전)
-torch>=2.0.0
 
 # Utilities
 httpx==0.26.0

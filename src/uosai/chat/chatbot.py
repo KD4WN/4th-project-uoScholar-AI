@@ -18,16 +18,13 @@ from pydantic import BaseModel
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_pinecone import PineconeVectorStore
 from langchain.schema import Document
-from langchain.embeddings.base import Embeddings
 from pinecone import Pinecone
-from sentence_transformers import SentenceTransformer
 import cohere
 
 # ===== 환경 설정 =====
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 CHAT_MODEL = os.getenv("CHAT_MODEL", "gpt-4o-mini")
-EMBED_TYPE = os.getenv("EMBED_TYPE", "korean")
-EMBED_MODEL = os.getenv("EMBED_MODEL", "jhgan/ko-sroberta-multitask")  # 한국어 모델
+EMBED_MODEL = os.getenv("EMBED_MODEL", "text-embedding-3-small")
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 PINECONE_INDEX = os.getenv("PINECONE_INDEX", "uos-notices")
 PINECONE_NS = os.getenv("PINECONE_NAMESPACE")
@@ -138,46 +135,14 @@ def get_llm():
         )
     return _llm
 
-class KoreanSentenceTransformerEmbeddings(Embeddings):
-    """한국어 임베딩 클래스 (캐싱 기능 포함)"""
-    def __init__(self, model_name: str):
-        self.model = SentenceTransformer(model_name)
-        # 진행률 표시 비활성화로 로그 정리
-        self.model.show_progress_bar = False
-        # 쿼리 임베딩 캐시
-        self._query_cache = {}
-
-    def embed_documents(self, texts):
-        return self.model.encode(texts, convert_to_tensor=False, show_progress_bar=False).tolist()
-
-    def embed_query(self, text):
-        # 쿼리 임베딩 캐싱으로 속도 향상
-        if text in self._query_cache:
-            return self._query_cache[text]
-
-        embedding = self.model.encode([text], convert_to_tensor=False, show_progress_bar=False)[0].tolist()
-
-        # 캐시 크기 제한 (메모리 관리)
-        if len(self._query_cache) > 50:
-            # 가장 오래된 항목 제거
-            oldest_key = next(iter(self._query_cache))
-            del self._query_cache[oldest_key]
-
-        self._query_cache[text] = embedding
-        return embedding
-
 def get_embeddings():
     global _embeddings
     if _embeddings is None:
-        if EMBED_TYPE == "korean":
-            _embeddings = KoreanSentenceTransformerEmbeddings(EMBED_MODEL)
-            logging.info("Korean embedding model loaded: %s", EMBED_MODEL)
-        else:
-            _embeddings = OpenAIEmbeddings(
-                model=EMBED_MODEL,
-                api_key=OPENAI_API_KEY
-            )
-            logging.info("OpenAI embedding model loaded: %s", EMBED_MODEL)
+        _embeddings = OpenAIEmbeddings(
+            model=EMBED_MODEL,
+            api_key=OPENAI_API_KEY
+        )
+        logging.info("OpenAI embedding model loaded: %s", EMBED_MODEL)
     return _embeddings
 
 def get_cohere_client():

@@ -18,8 +18,8 @@ def main():
     PINECONE_CLOUD = os.getenv("PINECONE_CLOUD", "aws")
     PINECONE_REGION = os.getenv("PINECONE_REGION", "us-east-1")
 
-    # 한국어 모델 차원 (768)
-    EMBED_DIM = 768
+    # OpenAI 임베딩 모델 차원 (text-embedding-3-small)
+    EMBED_DIM = 1536
 
     if not PINECONE_API_KEY:
         print("PINECONE_API_KEY가 설정되지 않았습니다.")
@@ -36,7 +36,7 @@ def main():
     else:
         print(f" 인덱스 '{PINECONE_INDEX}'가 존재하지 않습니다.")
 
-    # 2. 새 인덱스 생성 (768차원)
+    # 2. 새 인덱스 생성 (1536차원)
     print(f"새 인덱스 '{PINECONE_INDEX}' 생성 중")
     pc.create_index(
         name=PINECONE_INDEX,
