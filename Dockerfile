@@ -12,8 +12,6 @@ WORKDIR /app
 COPY requirements-chatbot.txt /app/
 RUN pip install --no-cache-dir -r requirements-chatbot.txt
 
-# SentenceTransformer 모델 미리 다운로드 (런타임 시 다운로드 방지)
-RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('jhgan/ko-sroberta-multitask')"
 
 # 소스 복사
 COPY . /app
