@@ -37,9 +37,9 @@ TOP_K = int(os.getenv("TOP_K", "12"))
 
 # 검색 설정 (Cohere Reranker 사용)
 USE_RERANKER = os.getenv("USE_RERANKER", "true").lower() == "true"
-INITIAL_SEARCH_K = int(os.getenv("INITIAL_SEARCH_K", "50"))  # 초기 검색 개수 (속도 최적화)
+INITIAL_SEARCH_K = int(os.getenv("INITIAL_SEARCH_K", "50"))  # 초기 검색 개수
 FINAL_TOP_K = int(os.getenv("FINAL_TOP_K", "5"))  # Reranker 후 최종 개수
-RERANK_THRESHOLD = float(os.getenv("RERANK_THRESHOLD", "0.1"))  # Reranker 점수 임계값 (더 관대하게)
+RERANK_THRESHOLD = float(os.getenv("RERANK_THRESHOLD", "0.1"))  # Reranker 점수 임계값 
 
 # 입력 검증 설정
 MAX_QUERY_LENGTH = int(os.getenv("MAX_QUERY_LENGTH", "500"))  # 쿼리 최대 길이
@@ -170,52 +170,56 @@ def get_vectorstore():
     return _vectorstore
 
 
-# ===== 공지 관련성 체크 =====
-def check_if_notice_related(user_input: str) -> bool:
-    """최신 사용자 입력이 공지사항과 관련된 질문인지 빠르게 판단"""
-
-    prompt = f"""다음 사용자 입력이 "대학 공지사항을 찾는 질문"인지 판단하세요.
-
-사용자 입력: {user_input}
-
-**공지사항 관련 예시:**
-- 장학금, 학사일정, 수강신청, 취업, 행사, 프로그램, 신청, 모집, 세미나, 워크숍 등
-- "창업 관련 공지 있어?", "장학금 신청 언제까지야?", "교환학생 신청 방법"
-
-**공지사항 무관 예시:**
-- 인사말 ("안녕", "반가워", "고마워")
-- 잡담 ("날씨 어때?", "점심 뭐 먹지?")
-- 일반 질문 ("학교 위치가 어디야?", "너는 누구야?")
-
-다음 중 하나로만 답변하세요:
-- "yes" (공지사항 관련 질문)
-- "no" (공지사항 무관)
-
-답변:"""
-
-    llm = get_llm()
-    response = llm.invoke(prompt)
-    answer = response.content.strip().lower()
-
-    # "yes" 포함 여부로 판단
-    return "yes" in answer
-
-
 # ===== 대화 요구사항 분석 =====
 def extract_requirements(conversation_history: List[Dict[str, str]]) -> Dict[str, Any]:
-    """대화 히스토리에서 사용자 요구사항 추출 (LLM 기반)"""
+    """대화 히스토리에서 사용자 요구사항 추출 (LLM 기반) - 최근 질문 우선"""
 
     # 모든 사용자 메시지를 합쳐서 분석
     user_messages = [msg["content"] for msg in conversation_history if msg["role"] == "user"]
-    full_conversation = " ".join(user_messages)
 
-    prompt = f"""다음 대화에서 사용자가 찾고 있는 공지사항의 요구사항을 JSON 형태로 추출해주세요.
+    # 최근 3개 메시지에 더 높은 가중치 부여
+    recent_messages = user_messages[-3:] if len(user_messages) > 3 else user_messages
 
-대화 내용: {full_conversation}
+    # 전체 대화 (user + assistant) - 주제 맥락 유지를 위해
+    full_conversation_with_context = []
+    for msg in conversation_history[-6:]:  # 최근 6개 메시지만 (성능 고려)
+        role = msg["role"]
+        content = msg["content"][:200]  # 너무 긴 메시지는 잘라냄
+        full_conversation_with_context.append(f"{role}: {content}")
+
+    context_string = "\n".join(full_conversation_with_context)
+
+    prompt = f"""다음 대화에서 사용자가 **현재** 찾고 있는 공지사항의 요구사항을 JSON 형태로 추출해주세요.
+
+**최근 대화 (user/assistant 포함, 맥락 유지)**:
+{context_string}
+
+**최근 사용자 질문 (가장 중요)**: {' '.join(recent_messages)}
+
+**중요**:
+1. **최근 질문이 가장 중요합니다**. 사용자가 주제를 바꿨다면 이전 대화를 무시하고 최근 질문에만 집중하세요.
+2. 예: "장학금 있어?" -> "해외탐방 공지 뭐있어?" 라면, **해외탐방**에만 집중
+3. "다른 건 없어?"같은 질문은 같은 주제에서 **다른 공지**를 찾는 것입니다
+4. **specific_requirements는 간결하게**: 검색에 사용될 핵심 키워드 위주로 1-2문장으로 작성 (예: "해외탐방 프로그램 공지", "장학금 신청 관련 공지")
 
 먼저, 이 대화가 "대학 공지사항을 찾는 질문"인지 판단하세요.
-- 공지사항 관련: 장학금, 학사일정, 수강신청, 취업, 행사, 프로그램, 신청, 모집 등
-- 공지사항 무관: 인사말, 잡담, 일상 대화, 공지와 관련 없는 질문
+
+**공지사항 관련 (is_notice_related: true):**
+- 장학금, 학사일정, 수강신청, 취업, 행사, 프로그램, 신청, 모집, 세미나, 워크숍, 공모전, 대회, 특강, 설명회
+- 교환학생, 해외탐방, 인턴십, 봉사활동, 동아리, 학생회, 기숙사
+- "공지 뭐있어?", "언제까지야?", "신청 방법", "어떻게 해?" 등 공지 관련 정보 요청
+- **후속 질문**: "이거 말고 다른 건?", "다른 공지는?", "또 뭐있어?", "추가로 있어?", "더 없어?" 등
+- 대학 생활과 관련된 대부분의 질문
+- **대화 맥락**: 이전 대화에서 공지를 찾고 있었다면, "이거", "그거", "다른 거" 같은 지시어도 공지 관련으로 판단
+
+**공지사항 무관 (is_notice_related: false):**
+- 순수 인사말만 있는 경우 ("안녕", "반가워", "고마워")
+- 완전한 잡담 ("날씨 어때?", "점심 뭐 먹지?")
+- 학교와 완전히 무관한 질문 ("주식 투자 어떻게 해?", "게임 추천해줘")
+
+**핵심 원칙**:
+1. 이전 대화에서 공지를 찾고 있었다면, 후속 질문은 거의 항상 is_notice_related: true
+2. 조금이라도 대학 생활, 학교, 학사, 행사와 관련이 있으면 is_notice_related: true
 
 다음 형태의 JSON으로 응답해주세요:
 {{
@@ -262,7 +266,9 @@ JSON만 응답하세요:"""
             requirements["keywords"] = important_words[:5]  # 최대 5개
 
         if not requirements.get("specific_requirements"):
-            requirements["specific_requirements"] = full_conversation
+            # 최근 2개 질문만 사용 (길이 제한)
+            recent_query = " ".join(recent_messages[-2:]) if len(recent_messages) >= 2 else " ".join(recent_messages)
+            requirements["specific_requirements"] = recent_query
 
         return requirements
 
@@ -278,14 +284,80 @@ JSON만 응답하세요:"""
         # 중복 제거하고 상위 5개 선택
         unique_keywords = list(dict.fromkeys(important_words))[:5]
 
+        # 최근 2개 질문만 사용 (길이 제한)
+        recent_query = " ".join(recent_messages[-2:]) if len(recent_messages) >= 2 else " ".join(recent_messages)
+
         return {
             "is_notice_related": True,  # 파싱 실패 시 기본값
             "category": "기타",
             "keywords": unique_keywords,
             "target_audience": "전체",
             "urgency": "보통",
-            "specific_requirements": full_conversation[:200]  # 너무 길지 않게 제한
+            "specific_requirements": recent_query[:200]  # 최근 질문 + 길이 제한
         }
+
+# ===== 사용자 의도 분류 =====
+def classify_user_intent(current_query: str, previous_notice: Optional[Dict[str, Any]]) -> str:
+    """사용자 의도를 LLM으로 분류: follow_up, diversity, topic_change"""
+
+    if not previous_notice:
+        return "topic_change"  # 이전 공지가 없으면 새로운 검색
+
+    prev_title = previous_notice.get("title", "")
+    prev_category = previous_notice.get("category", "")
+    prev_content = previous_notice.get("content", "")[:200]
+
+    prompt = f"""사용자의 현재 질문이 어떤 의도인지 분류해주세요.
+
+**이전에 추천한 공지**:
+- 제목: {prev_title}
+- 카테고리: {prev_category}
+- 내용: {prev_content}
+
+**현재 사용자 질문**: {current_query}
+
+다음 3가지 중 하나로 분류하세요:
+
+1. **follow_up** (후속 질문)
+   - 이전 공지에 대한 추가 정보 요청
+   - 예: "언제까지야?", "신청 방법은?", "소득 분위 제한 있어?", "자격은?"
+   - 이전 공지로 답변 가능한 질문
+
+2. **diversity** (다양성 요구)
+   - 같은 주제/카테고리에서 다른 공지를 원함
+   - 예: "다른 장학금도 있어?", "그거 말고 다른 거", "또 다른 건?", "추가로 뭐있어?"
+   - 주제는 유지하되 다른 공지 필요
+
+3. **topic_change** (주제 전환)
+   - 완전히 새로운 주제로 전환
+   - 예: "장학금 말고 해외탐방 알려줘", "취업 관련 공지는?", "동아리 모집 있어?"
+   - 이전 주제와 다른 새로운 주제
+
+**판단 기준**:
+- "그거 말고 다른 거"처럼 새 주제가 명시 안 되면 → **diversity**
+- "말고 [새 주제]"처럼 새 주제가 명시되면 → **topic_change**
+- 이전 공지에 대한 구체적 질문이면 → **follow_up**
+
+다음 중 하나만 답변하세요: follow_up, diversity, topic_change
+
+답변:"""
+
+    llm = get_llm()
+    response = llm.invoke(prompt)
+    intent = response.content.strip().lower()
+
+    # 유효한 값 중 하나로 매핑
+    if "follow" in intent:
+        return "follow_up"
+    elif "diversity" in intent:
+        return "diversity"
+    elif "topic" in intent or "change" in intent:
+        return "topic_change"
+    else:
+        # 기본값: 후속 질문으로 간주
+        logging.warning(f"Unknown intent: {intent}, defaulting to follow_up")
+        return "follow_up"
+
 
 # ===== 일반 대화 응답 생성 =====
 def generate_casual_response(conversation_history: List[Dict[str, str]]) -> str:
@@ -461,8 +533,16 @@ def rerank_documents(query: str, docs: List[Document]) -> List[Tuple[Document, f
             logging.error("Fallback cosine similarity also failed: %s", fallback_error)
             return []
 
-def find_best_notice(requirements: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """요구사항을 바탕으로 가장 적합한 공지 1개 추천 (Cohere Reranker 사용)"""
+def find_best_notice(requirements: Dict[str, Any], excluded_doc_ids: List[str] = None) -> Optional[Dict[str, Any]]:
+    """요구사항을 바탕으로 가장 적합한 공지 1개 추천 (Cohere Reranker 사용)
+
+    Args:
+        requirements: 사용자 요구사항
+        excluded_doc_ids: 제외할 공지 ID 리스트 (이미 추천된 공지)
+    """
+
+    if excluded_doc_ids is None:
+        excluded_doc_ids = []
 
     try:
         # 1) 검색 쿼리 생성 - specific_req 직접 사용 (clean 과정 제거)
@@ -480,6 +560,7 @@ def find_best_notice(requirements: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                 search_query = ""
 
         logging.info("[RECOMMEND] specific_req=%s", specific_req[:100])
+        logging.info("[RECOMMEND] excluded_doc_ids=%s", excluded_doc_ids)
 
         if not search_query:
             logging.warning("[RECOMMEND] Empty search query")
@@ -522,24 +603,40 @@ def find_best_notice(requirements: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             logging.info("[RECOMMEND] No results after reranking")
             return None
 
-        # 5) 최고 점수 문서 선택
-        best_doc, best_score = reranked_results[0]
+        # 5) 이미 추천된 공지 제외
+        filtered_results = []
+        for doc, score in reranked_results:
+            # doc_id가 없으면 title을 식별자로 사용
+            doc_id = doc.metadata.get("doc_id") or doc.metadata.get("title", "")
+            if doc_id not in excluded_doc_ids:
+                filtered_results.append((doc, score))
+
+        if not filtered_results:
+            logging.info("[RECOMMEND] All results were excluded (already recommended)")
+            return None
+
+        # 6) 최고 점수 문서 선택
+        best_doc, best_score = filtered_results[0]
 
         # 상위 결과들 로깅 (디버깅용)
-        logging.info("[RECOMMEND] Top 3 results:")
-        for i, (doc, score) in enumerate(reranked_results[:3]):
+        logging.info("[RECOMMEND] Top 3 filtered results:")
+        for i, (doc, score) in enumerate(filtered_results[:3]):
             title = doc.metadata.get("title", "제목없음")[:50]
-            logging.info("  %d. Score: %.3f | Title: %s", i+1, score, title)
+            doc_id = doc.metadata.get("doc_id") or doc.metadata.get("title", "")
+            logging.info("  %d. Score: %.3f | ID: %s | Title: %s", i+1, score, doc_id[:50] if doc_id else "없음", title)
 
-        # 6) 임계값 확인
+        # 7) 임계값 확인
         if best_score < RERANK_THRESHOLD:
             logging.info("[RECOMMEND] Score below threshold: %.3f < %.3f", best_score, RERANK_THRESHOLD)
             return None
 
-        # 7) 결과 구성 (안전한 메타데이터 추출)
+        # 8) 결과 구성 (안전한 메타데이터 추출)
         try:
             metadata = best_doc.metadata or {}
             content = best_doc.page_content or ""
+
+            # doc_id가 없으면 title을 식별자로 사용
+            doc_id = metadata.get("doc_id") or metadata.get("title", "")
 
             return {
                 "content": content,
@@ -549,7 +646,7 @@ def find_best_notice(requirements: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                 "posted_date": metadata.get("posted_date", ""),
                 "department": metadata.get("department", ""),
                 "category": metadata.get("category", ""),
-                "doc_id": metadata.get("doc_id", "")
+                "doc_id": doc_id
             }
         except Exception as result_error:
             logging.error("[RECOMMEND] Result construction failed: %s", result_error)
@@ -560,10 +657,63 @@ def find_best_notice(requirements: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         return None
 
 
+def generate_answer_from_fixed_notice_stream(current_question: str, notice: Dict[str, Any], conversation_history: List[Dict[str, str]], delay: float = 0.03):
+    """고정된 공지로 현재 질문에 답변 (스트리밍)"""
+
+    # 최근 대화 맥락 포함
+    recent_context = []
+    for msg in conversation_history[-4:]:
+        role = msg["role"]
+        content = msg["content"][:150]
+        recent_context.append(f"{role}: {content}")
+
+    conversation_summary = "\n".join(recent_context)
+
+    # 현재 날짜
+    now = datetime.now()
+    current_date_str = now.strftime("%Y년 %m월 %d일")
+
+    prompt = f"""**현재 날짜: {current_date_str}**
+
+**최근 대화 맥락**:
+{conversation_summary}
+
+**사용자의 현재 질문**: {current_question}
+
+**이 공지사항을 바탕으로 답변하세요**:
+- 제목: {notice.get('title')}
+- 주관: {notice.get('department')}
+- 게시일: {notice.get('posted_date')}
+- 내용: {notice.get('content')[:1000]}
+
+**지침:**
+1. 사용자의 **현재 질문**에 직접적으로 답변하세요
+2. 공지사항 내용에서 해당 정보를 찾아 자연스럽게 설명하세요
+3. **현재 날짜를 참고**하여 답변하세요
+4. 형식적인 구조화된 답변 금지, 대화체로 작성
+5. 가독성을 위해 필요시 빈 줄(\\n\\n)로 문단 구분
+6. 공지 내용에 정보가 없다면 "해당 정보는 공지에 명시되어 있지 않아요"라고 안내
+
+자연스럽고 친근한 답변:"""
+
+    llm = get_llm()
+    for chunk in llm.stream(prompt):
+        if chunk.content:
+            time.sleep(delay)
+            yield chunk.content
+
+
 def generate_final_recommendation_stream(requirements: Dict[str, Any], notice: Dict[str, Any], conversation_history: List[Dict[str, str]], delay: float = 0.03):
     """최종 추천 메시지 스트리밍 생성 (속도 조절 가능)"""
 
-    conversation_summary = " ".join([msg["content"] for msg in conversation_history if msg["role"] == "user"])
+    # 최근 대화 맥락 포함 (user + assistant) - 더 정확한 답변 생성
+    recent_context = []
+    for msg in conversation_history[-4:]:  # 최근 4개 메시지
+        role = msg["role"]
+        content = msg["content"][:150]  # 너무 긴 내용은 잘라냄
+        recent_context.append(f"{role}: {content}")
+
+    conversation_summary = "\n".join(recent_context)
 
     # 현재 날짜 정보 추가
     now = datetime.now()
@@ -571,7 +721,8 @@ def generate_final_recommendation_stream(requirements: Dict[str, Any], notice: D
 
     prompt = f"""**현재 날짜: {current_date_str}**
 
-사용자가 다음과 같이 질문했습니다: "{conversation_summary}"
+**최근 대화 맥락**:
+{conversation_summary}
 
 이에 대한 답변으로 적합한 공지사항을 찾았습니다:
 
@@ -582,12 +733,12 @@ def generate_final_recommendation_stream(requirements: Dict[str, Any], notice: D
 - 내용: {notice.get('content')[:1000]}
 
 **지침:**
-1. 기간에 대한 답변을 할 경우, **현재 날짜를 고려하여** 모집/신청 기간이 지났는지, 진행 중인지, 예정인지 명확히 알려주세요
-2. 사용자의 구체적인 질문에 직접적으로 답변하세요
-3. 공지사항의 내용에서 사용자가 궁금해하는 부분을 중점적으로 설명하세요
-4. 형식적인 "행사:", "장소:" 같은 구조화된 답변 금지
-5. 자연스럽고 대화적인 톤으로 작성하세요
-6. 사용자가 알고 싶어하는 핵심 정보(언제, 어디서, 누가, 어떻게)를 자연스럽게 포함하세요
+1. 사용자의 구체적인 질문에 직접적으로 답변하세요
+2. 공지사항의 내용에서 사용자가 궁금해하는 부분을 중점적으로 설명하세요
+3. 형식적인 "행사:", "장소:" 같은 구조화된 답변 금지
+4. 자연스럽고 대화적인 톤으로 작성하세요
+5. 사용자가 알고 싶어하는 핵심 정보(언제, 어디서, 누가, 어떻게)를 자연스럽게 포함하세요
+6. **중요**: 가독성을 위해 문단 구분이 필요한 경우 빈 줄(\\n\\n)로 구분하세요. 특히 다른 주제나 정보가 이어질 때는 반드시 줄바꿈을 사용하세요
 
 자연스럽고 친근한 답변을 작성해주세요:"""
 
@@ -653,6 +804,7 @@ class ChatMessage(BaseModel):
     role: str  # "user" or "assistant"
     content: str
     timestamp: Optional[str] = None
+    recommended_notice: Optional[Dict[str, Any]] = None  # assistant 메시지에 포함된 공지 정보
 
     class Config:
         # Pydantic v2 호환성
@@ -708,12 +860,13 @@ def chat_stream(request: ChatRequest):
             })
 
             current_turn = len([m for m in messages if m["role"] == "user"])
-
-            # 먼저 최신 사용자 입력만으로 공지 관련성 체크
             latest_user_message = request.query
-            is_notice_related = check_if_notice_related(latest_user_message)
 
-            if not is_notice_related:
+            # 전체 대화 맥락으로 요구사항 추출 (공지 관련성도 함께 판단)
+            requirements = extract_requirements(messages)
+
+            # extract_requirements의 is_notice_related 필드로 판단
+            if not requirements.get("is_notice_related", True):
                 # 공지사항과 관련 없는 질문: 일반 대화 응답
                 # 히스토리에 반영하지 않기 위해 messages에서 방금 추가한 메시지 제거
                 messages.pop()  # 마지막에 추가한 현재 사용자 메시지 제거
@@ -730,11 +883,44 @@ def chat_stream(request: ChatRequest):
                 yield f"data: {json.dumps({'type': 'done', 'turn': current_turn, 'notice': None, 'not_saved': True})}\n\n"
                 return
 
-            # 공지 관련 질문이면 전체 대화 맥락으로 요구사항 추출
-            requirements = extract_requirements(messages)
+            # 최근 대화에서 고정된 공지 찾기
+            fixed_notice = None
+            for msg in reversed(messages[-6:]):  # 최근 6개 메시지, 역순
+                if msg["role"] == "assistant":
+                    notice_info = msg.get("recommended_notice")
+                    if notice_info and isinstance(notice_info, dict):
+                        fixed_notice = notice_info
+                        logging.info("[FIXED] Found previous notice: %s", fixed_notice.get("title", "")[:50])
+                        break
 
-            # 공지사항 관련 질문: 최적 공지 찾기
-            best_notice = find_best_notice(requirements)
+            # 사용자 의도 분류
+            user_intent = classify_user_intent(latest_user_message, fixed_notice)
+            logging.info("[INTENT] User intent: %s", user_intent)
+
+            # 의도별 분기 처리
+            if user_intent == "follow_up" and fixed_notice:
+                # 1. 후속 질문: 고정된 공지로 답변 (재검색 안 함)
+                logging.info("[FLOW] Using fixed notice for follow-up question")
+                yield f"data: {json.dumps({'type': 'status', 'content': 'found'})}\n\n"
+
+                for chunk in generate_answer_from_fixed_notice_stream(latest_user_message, fixed_notice, messages, delay=0.03):
+                    yield f"data: {json.dumps({'type': 'token', 'content': chunk})}\n\n"
+
+                yield f"data: {json.dumps({'type': 'done', 'turn': current_turn, 'notice': fixed_notice, 'reused': True})}\n\n"
+                return
+
+            elif user_intent == "diversity" and fixed_notice:
+                # 2. 다양성 요구: 같은 주제로 재검색 (이전 공지 제외)
+                logging.info("[FLOW] Diversity request - excluding previous notice")
+                # doc_id 또는 title을 고유 식별자로 사용 (빈 값 체크)
+                prev_doc_id = fixed_notice.get("doc_id") or fixed_notice.get("title")
+                excluded_doc_ids = [prev_doc_id] if prev_doc_id else []
+                best_notice = find_best_notice(requirements, excluded_doc_ids)
+
+            else:
+                # 3. 주제 전환 또는 첫 질문: 새로운 검색
+                logging.info("[FLOW] New search (topic_change or first query)")
+                best_notice = find_best_notice(requirements, [])
 
             if best_notice:
                 # 공지를 찾았다는 신호 전송
