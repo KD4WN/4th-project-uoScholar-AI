@@ -73,17 +73,10 @@ UoScholar는 서울시립대학교 공지사항 데이터를 크롤링하고, �
 최종추천   명확화질문
 ```
 
-**특징**:
-- **Stateless 대화 관리**: 클라이언트가 전체 대화 히스토리를 전송
-- **사용자 의도 분류**: 후속 질문(기존 공지 재사용) / 다양성 요구(다른 공지 검색) / 주제 전환(새 검색)
-- **공지 관련 여부 판단**: LLM이 질문을 분석하여 공지 검색이 필요한지 자동 판단
-- **명확화 질문**: 검색 결과가 부족하면 추가 정보를 자연스럽게 요청
-- **날짜 인식**: "최근", "이번 달" 등 상대적 날짜 표현 처리 (현재 날짜 기준)
-- **스트리밍 응답**: SSE(Server-Sent Events) 방식으로 실시간 응답 전송
 
 **API 엔드포인트**:
 ```bash
-# 스트리밍 응답 (권장)
+# 스트리밍 응답
 POST /chat/stream
 {
   "query": "장학금 신청 일정 알려줘",
@@ -91,13 +84,6 @@ POST /chat/stream
     {"role": "user", "content": "안녕"},
     {"role": "assistant", "content": "안녕하세요!"}
   ]
-}
-
-# 일반 응답 (레거시)
-POST /chat
-{
-  "query": "장학금 신청 일정 알려줘",
-  "conversation_history": []
 }
 ```
 
@@ -138,10 +124,6 @@ POST /chat
 - **MySQL**: 공지 원본 데이터 저장
 - **Pinecone**: 벡터 인덱스 (코사인 유사도 검색)
 
-### DevOps
-- **python-dotenv**: 환경 변수 관리
-- **logging**: 로그 추적
-
 ---
 
 ## 설치 및 실행
@@ -149,10 +131,6 @@ POST /chat
 ### 1. 환경 설정
 
 ```bash
-# Python 가상환경 생성 (권장)
-python -m venv venv
-source venv/bin/activate  # Windows: venv\Scripts\activate
-
 # 크롤러 의존성 설치
 pip install -r requirements-crawler.txt
 
@@ -174,11 +152,11 @@ DB_HOST=localhost
 DB_PORT=3306
 DB_USER=root
 DB_PASSWORD=yourpassword
-DB_NAME=uos_notices
+DB_NAME=your_db_name
 
 # Pinecone
 PINECONE_API_KEY=...
-PINECONE_INDEX=uos-notices
+PINECONE_INDEX=index_name
 PINECONE_NAMESPACE=  # 비워두면 기본 네임스페이스 사용
 PINECONE_CLOUD=aws
 PINECONE_REGION=us-east-1
