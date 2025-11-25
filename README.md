@@ -13,7 +13,7 @@ UoScholar는 서울시립대학교 공지사항 데이터를 크롤링하고, �
 
 ```
 공지 크롤링 → MySQL → 벡터 인덱싱 → Pinecone → RAG 챗봇 → 사용자
-(Playwright)         (한국어 임베딩)        (Cohere Reranker)
+(Playwright)         (OpenAI 임베딩)        (Cohere Reranker)
 ```
 
 ---
@@ -29,12 +29,14 @@ UoScholar는 서울시립대학교 공지사항 데이터를 크롤링하고, �
 ### 2. 벡터 인덱싱 (`index.py`)
 - MySQL에서 공지 데이터 읽기
 - LangChain으로 900자 단위 청킹 (오버랩 150자)
-- 한국어 임베딩 모델(`jhgan/ko-sroberta-multitask`)로 768차원 벡터 생성
-- Pinecone에 title/summary 타입 구분하여 저장
+- OpenAI 임베딩 모델(`text-embedding-3-small`)로 1536차원 벡터 생성
+- Pinecone에 벡터 저장 (코사인 유사도 검색)
 
 ### 3. RAG 챗봇 (`chatbot.py`)
-- **Cohere Reranker**로 검색 결과 재정렬
-- **세션 기반 대화 관리** (대화 히스토리 추적)
+- **Cohere Reranker**로 검색 결과 재정렬 (초기 50개 → 최종 5개)
+- **Stateless 대화 관리** (클라이언트가 대화 히스토리 전송)
+- **스트리밍 응답** (`/chat/stream` 엔드포인트)
+- **사용자 의도 분류** (후속 질문 / 다양성 요구 / 주제 전환)
 - **요구사항 자동 추출** (LLM이 키워드, 카테고리 등 분석)
 - **명확화 질문 생성** (검색 실패 시 추가 정보 요청)
 
@@ -72,17 +74,30 @@ UoScholar는 서울시립대학교 공지사항 데이터를 크롤링하고, �
 ```
 
 **특징**:
-- **세션 기반 대화 관리**: `session_id`로 대화 히스토리 추적
+- **Stateless 대화 관리**: 클라이언트가 전체 대화 히스토리를 전송
+- **사용자 의도 분류**: 후속 질문(기존 공지 재사용) / 다양성 요구(다른 공지 검색) / 주제 전환(새 검색)
 - **공지 관련 여부 판단**: LLM이 질문을 분석하여 공지 검색이 필요한지 자동 판단
 - **명확화 질문**: 검색 결과가 부족하면 추가 정보를 자연스럽게 요청
 - **날짜 인식**: "최근", "이번 달" 등 상대적 날짜 표현 처리 (현재 날짜 기준)
+- **스트리밍 응답**: SSE(Server-Sent Events) 방식으로 실시간 응답 전송
 
 **API 엔드포인트**:
 ```bash
+# 스트리밍 응답 (권장)
+POST /chat/stream
+{
+  "query": "장학금 신청 일정 알려줘",
+  "conversation_history": [
+    {"role": "user", "content": "안녕"},
+    {"role": "assistant", "content": "안녕하세요!"}
+  ]
+}
+
+# 일반 응답 (레거시)
 POST /chat
 {
   "query": "장학금 신청 일정 알려줘",
-  "session_id": "user123"
+  "conversation_history": []
 }
 ```
 
@@ -107,12 +122,12 @@ POST /chat
 ## 기술 스택
 
 ### Backend & AI
-- **Python 3.10+**: 전체 시스템 구현 언어
-- **FastAPI**: REST API 서버 (비동기 처리)
+- **Python 3.11**: 전체 시스템 구현 언어
+- **FastAPI**: REST API 서버 (비동기 처리, SSE 스트리밍)
 - **LangChain**: RAG 파이프라인 구축 (청킹, 벡터 검색)
 - **OpenAI GPT-4o / GPT-4o-mini**: 멀티모달 요약, 대화 생성, 요구사항 분석
-- **Cohere Rerank**: 검색 결과 재정렬
-- **SentenceTransformers**: 한국어 임베딩 (`jhgan/ko-sroberta-multitask`)
+- **OpenAI Embeddings**: `text-embedding-3-small` (1536차원)
+- **Cohere Rerank**: 검색 결과 재정렬 (`rerank-multilingual-v3.0`)
 
 ### Crawling & Processing
 - **Requests + BeautifulSoup4**: HTML 파싱
@@ -138,8 +153,11 @@ POST /chat
 python -m venv venv
 source venv/bin/activate  # Windows: venv\Scripts\activate
 
-# 의존성 설치
-pip install -r requirements.txt
+# 크롤러 의존성 설치
+pip install -r requirements-crawler.txt
+
+# 챗봇 의존성 설치
+pip install -r requirements-chatbot.txt
 
 # Playwright 브라우저 설치
 playwright install chromium
@@ -166,8 +184,7 @@ PINECONE_CLOUD=aws
 PINECONE_REGION=us-east-1
 
 # Embedding
-EMBED_TYPE=korean
-EMBED_MODEL=jhgan/ko-sroberta-multitask
+EMBED_MODEL=text-embedding-3-small
 
 # Cohere (Reranker)
 COHERE_API_KEY=...
