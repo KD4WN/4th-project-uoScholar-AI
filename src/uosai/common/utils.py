@@ -179,6 +179,19 @@ def get_vectorstore() -> PineconeVectorStore:
 
 
 def upsert_docs(docs: List[Document], rebuild: bool = False) -> int:
+    """Pinecone에 문서를 upsert합니다.
+
+    Args:
+        docs: 업서트할 문서 리스트
+        rebuild: True면 전체 삭제 후 재삽입, False면 증분 업데이트 (기본값)
+
+    Returns:
+        업서트된 문서 개수
+
+    Note:
+        - rebuild=False (증분 모드): 동일 ID 문서는 덮어쓰기, 신규는 삽입 (WUs 절약)
+        - rebuild=True (전체 리빌드): 모든 문서 삭제 후 재삽입 (월 1회 권장)
+    """
     if not PINECONE_API_KEY:
         raise RuntimeError("PINECONE_API_KEY missing")
 
@@ -186,11 +199,11 @@ def upsert_docs(docs: List[Document], rebuild: bool = False) -> int:
     ensure_pinecone_index(pc, PINECONE_INDEX, EMBED_DIM)
     vs = get_vectorstore()
 
-    # 첫 배치에서만 전체 삭제할 때 사용
+    # rebuild=True일 때만 전체 삭제 (WUs 대량 소모)
     if rebuild:
         idx = pc.Index(PINECONE_INDEX)
         ns_repr = "__default__" if PINECONE_NS is None else PINECONE_NS
-        print(f"[pinecone] delete_all namespace={ns_repr}")
+        print(f"[pinecone] FULL REBUILD: delete_all namespace={ns_repr}")
         try:
             if PINECONE_NS is None:
                 idx.delete(delete_all=True)  # 기본 네임스페이스
@@ -199,8 +212,10 @@ def upsert_docs(docs: List[Document], rebuild: bool = False) -> int:
         except Exception as e:
             # 존재하지 않는 네임스페이스면 지울 게 없어서 404가 날 수 있음 — 경고만 출력
             print(f"[pinecone] delete_all warning: {e}")
+    else:
+        print(f"[pinecone] INCREMENTAL UPDATE: upserting {len(docs)} documents")
 
-    # 업서트
+    # 업서트 (동일 ID면 덮어쓰기, 신규면 삽입)
     ids = []
     for i, d in enumerate(docs):
         m = d.metadata or {}

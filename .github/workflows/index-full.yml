@@ -1,29 +1,13 @@
-name: Incremental Index Update
+name: Monthly Full Index Rebuild
 
 on:
-  workflow_run:
-    workflows: ["Daily UOS Notices"]
-    types:
-      - completed
-  workflow_dispatch:
-    inputs:
-      mode:
-        description: 'Indexing mode (incremental or full)'
-        required: false
-        default: 'incremental'
-        type: choice
-        options:
-          - incremental
-          - full
+  schedule:
+    - cron: "0 3 1 * *"  # 매월 1일 오전 3시 (UTC)
+  workflow_dispatch: {}
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    if: >
-      github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'workflow_run' &&
-      github.event.workflow_run.conclusion == 'success')
-
 
     steps:
       - uses: actions/checkout@v4
@@ -38,7 +22,7 @@ jobs:
            pip install --upgrade "setuptools<75" wheel
            pip install -r requirements-indexer.txt -v
 
-      - name: Run indexer (incremental update)
+      - name: Run full rebuild
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           DB_HOST: ${{ secrets.DB_HOST }}
@@ -49,9 +33,8 @@ jobs:
           PINECONE_API_KEY: ${{ secrets.PINECONE_API_KEY }}
           PINECONE_INDEX: ${{ secrets.PINECONE_INDEX }}
           PINECONE_NAMESPACE: ${{ secrets.PINECONE_NAMESPACE }}
-          # 증분 업데이트 설정
-          INDEX_MODE: ${{ github.event.inputs.mode || 'incremental' }}
-          INCREMENTAL_DAYS: 14
+          # 전체 리빌드 설정
+          INDEX_MODE: full
           PYTHONPATH: ${{ github.workspace }}/src
         run: |
           python -m uosai.indexer.index
